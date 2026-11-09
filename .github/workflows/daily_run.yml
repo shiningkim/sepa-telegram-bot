@@ -2,7 +2,7 @@ name: SEPA Daily Screener
 
 on:
   schedule:
-    - cron: '30 21 * * 1-5'
+    - cron: '37 22 * * 1-5'
   workflow_dispatch:
 
 jobs:
