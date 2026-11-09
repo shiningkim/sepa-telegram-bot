@@ -20,7 +20,7 @@ jobs:
 
       - name: 필요 패키지 설치
         run: |
-          pip install yfinance pandas requests
+          pip install yfinance pandas requests lxml html5lib
 
       - name: 스크리너 실행
         env:
