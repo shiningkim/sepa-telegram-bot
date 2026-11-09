@@ -173,7 +173,7 @@ def main():
 
     passed_stocks.sort(key=lambda x: x['drop_pct'], reverse=True)
     
-    # 텔레그램 메시지 헤더: 시장 신호등 브리핑
+# 텔레그램 메시지 헤더: 시장 신호등 브리핑
     msg = f"🚦 *[SEPA 시장 신호등 & 데일리 브리핑]*\n"
     msg += f"• **상태**: {status}\n"
     msg += f"• **S&P 500 종가**: `{index_price}`pt (유효 분산일: {dist_count}개)\n"
@@ -181,25 +181,28 @@ def main():
     msg += f"• **진단**: _{comment}_\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
     
-    # 신호등 상태에 따른 종목 노출 처리
+    total_count = len(passed_stocks)
+    
     if "🔴 빨간불" in status:
-        msg += "⚠️ *[하락장 경보: 신규 매수 전면 금지]*\n"
-        msg += "시장이 빨간불일 때는 종목이 템플릿을 통과하더라도 가짜 돌파 실패율이 70%를 상회합니다. 모든 돌파 매수를 중단하고 현금을 100% 지키십시오.\n\n"
-        if passed_stocks:
-            msg += f"_※ 차트가 깨지지 않고 버티는 관찰 후보 ({len(passed_stocks)}개):_\n"
-            for s in passed_stocks[:5]:
-                msg += f"• `{s['ticker']}` (${s['price']}, 고점 대비 {s['drop_pct']}%) - 매수 금지/관찰용\n"
+        msg += f"⚠️ *[하락장 경보: 신규 매수 전면 금지 (현금 100%)]*\n"
+        msg += f"지수 급락 속에서도 차트를 방어 중인 괴물 상대강도(RS) 주도주 **총 {total_count}개**입니다. (지금 사지 마시고 지수 FTD가 뜰 때까지 관심종목에만 등록)\n\n"
     else:
-        if passed_stocks:
-            msg += f"🏆 *[오늘의 Tier 1 정예 주도주 ({len(passed_stocks)}개)]*\n\n"
-            for s in passed_stocks[:10]:
-                msg += f"⭐ *{s['ticker']}*: ${s['price']}\n"
-                msg += f"   • 고점 괴리: `{s['drop_pct']}%` (전고점 ${s['high_52w']})\n"
-                msg += f"   • 거래량 수축: `50일 평균의 {s['vol_ratio']}%` 🧊\n"
-                msg += f"   • 5일 캔들 응축: `진폭 {s['tight_pct']}%`\n\n"
-            msg += "👉 *실전 대응*: 피벗 돌파 시 -4% 스탑로스로 진입"
+        msg += f"🏆 *[오늘의 Tier 1 정예 주도주 ({total_count}개)]*\n\n"
+
+    if passed_stocks:
+        # 상위 20개까지 제한 없이 모두 표시
+        for idx, s in enumerate(passed_stocks[:20], 1):
+            msg += f"{idx}. ⭐ *{s['ticker']}*: ${s['price']}\n"
+            msg += f"   • 고점 괴리: `{s['drop_pct']}%` (전고점 ${s['high_52w']})\n"
+            msg += f"   • 거래량 수축: `50일 평균의 {s['vol_ratio']}%` 🧊\n"
+            msg += f"   • 5일 캔들 응축: `진폭 {s['tight_pct']}%` (Tight)\n\n"
+            
+        if "🔴 빨간불" in status:
+            msg += "👉 *실전 전략*: 아무리 자리가 예뻐도 시장 FTD 확인 전까지는 '눈으로만 관찰'하십시오."
         else:
-            msg += "ℹ️ *[주도주 알림]*: 완벽한 VCP 조건을 만족한 종목 0개 (관망 국면)"
+            msg += "👉 *실전 대응*: 피벗 돌파 시 -4% 스탑로스로 진입"
+    else:
+        msg += "ℹ️ 조건 통과 종목 0개 (현금 보존 국면)"
             
     send_telegram_msg(msg)
 
