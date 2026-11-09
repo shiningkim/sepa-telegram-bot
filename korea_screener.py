@@ -1,21 +1,17 @@
+하는 김에 한국 시장 코드도 수정해줘.
+
 import os
 import time
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
 import FinanceDataReader as fdr
-import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def send_telegram_msg(message: str):
-    """텔레그램 메시지 전송 (최대 3회 재시도 및 25초 타임아웃)"""
-    if not BOT_TOKEN or not CHAT_ID:
-        print("[Telegram] 토큰 또는 Chat ID가 설정되지 않았습니다.")
-        return
-        
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -104,140 +100,7 @@ def get_target_tickers():
     return targets
 
 # ==========================================
-# 📊 3. 윌리엄 오닐 스타일 가중 RS 계산 및 랭킹 정렬
-# ==========================================
-def calculate_rs_score(close_series: pd.Series) -> float:
-    """
-    윌리엄 오닐 가중 RS 공식:
-    RS = (2 * 3M 수익률) + 6M 수익률 + 9M 수익률 + 12M 수익률
-    """
-    try:
-        if len(close_series) < 180:
-            return 0.0
-            
-        curr = close_series.iloc[-1]
-        p_3m = (curr - close_series.iloc[-60]) / close_series.iloc[-60] if len(close_series) >= 60 else 0
-        p_6m = (curr - close_series.iloc[-120]) / close_series.iloc[-120] if len(close_series) >= 120 else 0
-        p_9m = (curr - close_series.iloc[-180]) / close_series.iloc[-180] if len(close_series) >= 180 else 0
-        p_12m = (curr - close_series.iloc[0]) / close_series.iloc[0]
-
-        return float((2 * p_3m) + p_6m + p_9m + p_12m)
-    except Exception:
-        return 0.0
-
-def rank_candidates_by_rs(candidates: list) -> list:
-    """선별 후보군 내 상대 강도를 1~99점 백분위 RS Rating으로 환산 후 정렬"""
-    if not candidates:
-        return []
-
-    candidates.sort(key=lambda x: x.get("rs_raw", 0.0), reverse=True)
-    total = len(candidates)
-    
-    for idx, item in enumerate(candidates):
-        if total == 1:
-            item["rs_score"] = 99
-        else:
-            item["rs_score"] = 99 - int((idx / total) * 98)
-            
-    return candidates
-
-# ==========================================
-# 💎 4. 국내장 맞춤형 CANSLIM 펀더멘털(C, A, I) 정밀 진단
-# ==========================================
-def check_korea_canslim_fundamentals(code: str, market: str) -> dict:
-    """
-    국내 종목 CANSLIM 펀더멘털 진단:
-    - C (Current Growth): 최근 분기 영업이익/순이익 YoY 성장률 >= 20%
-    - A (Annual Growth): 연간 실적 성장 추세
-    - I (Institutions): 외국인 보유율 또는 기관 지분율 >= 15%
-    """
-    summary = {
-        "ticker": code,
-        "is_canslim": False,
-        "c_pass": False,
-        "a_pass": False,
-        "i_pass": False,
-        "eps_growth": "N/A",
-        "inst_ownership": "N/A",
-        "fwd_growth": "N/A"
-    }
-
-    # 1. 네이버 금융 기업분석 테이블 우선 파싱
-    try:
-        url = f"https://finance.naver.com/item/main.naver?code={code}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        
-        if resp.status_code == 200:
-            tables = pd.read_html(resp.text)
-            for table in tables:
-                # 네이버 재무제표 요약 테이블 탐색
-                if any('주요재무제표' in str(c) for c in table.columns):
-                    table.columns = ['_'.join(col).strip() if isinstance(col, tuple) else str(col) for col in table.columns]
-                    # 영업이익 또는 당기순이익 행 추출
-                    for idx, row in table.iterrows():
-                        row_name = str(row.iloc[0])
-                        if '영업이익' in row_name or '당기순이익' in row_name:
-                            vals = [pd.to_numeric(str(v).replace(',', ''), errors='coerce') for v in row.iloc[1:]]
-                            vals = [v for v in vals if pd.notnull(v)]
-                            if len(vals) >= 2 and vals[-2] > 0:
-                                growth = (vals[-1] - vals[-2]) / abs(vals[-2])
-                                summary["eps_growth"] = f"{growth * 100:.1f}%"
-                                if growth >= 0.20:
-                                    summary["c_pass"] = True
-                                    summary["a_pass"] = True
-                            break
-                    break
-
-            # 외국인 지분율 탐색
-            for table in tables:
-                text_dump = table.to_string()
-                if '외국인보유율' in text_dump or '외국인 소진율' in text_dump:
-                    for idx, row in table.iterrows():
-                        line = " ".join([str(val) for val in row.values])
-                        if '외국인' in line and '%' in line:
-                            import re
-                            match = re.search(r'([\d\.]+)%', line)
-                            if match:
-                                frgn_rate = float(match.group(1))
-                                summary["inst_ownership"] = f"{frgn_rate:.1f}%"
-                                if frgn_rate >= 15.0:
-                                    summary["i_pass"] = True
-                            break
-    except Exception:
-        pass
-
-    # 2. 결측치 발생 시 yfinance로 보완 fallback
-    if not summary["c_pass"] or summary["inst_ownership"] == "N/A":
-        try:
-            yf_ticker = f"{code}.KS" if market == "코스피" else f"{code}.KQ"
-            t = yf.Ticker(yf_ticker)
-            info = t.info
-
-            if not summary["c_pass"]:
-                eg = info.get("earningsGrowth")
-                if eg is not None:
-                    summary["eps_growth"] = f"{eg * 100:.1f}%"
-                    if eg >= 0.20:
-                        summary["c_pass"] = True
-
-            if summary["inst_ownership"] == "N/A":
-                inst = info.get("heldPercentInstitutions")
-                if inst is not None:
-                    summary["inst_ownership"] = f"{inst * 100:.1f}%"
-                    if inst >= 0.15:
-                        summary["i_pass"] = True
-        except Exception:
-            pass
-
-    # 종합 판정: 분기 실적 20%+ 만족 및 (연간 추세 또는 외국인/기관 지분 확보)
-    if summary["c_pass"] and (summary["a_pass"] or summary["i_pass"]):
-        summary["is_canslim"] = True
-
-    return summary
-
-# ==========================================
-# 5. 개별 종목 정밀 SEPA & 탄력 VCP 필터
+# 3. 개별 종목 정밀 SEPA & 탄력 VCP 필터
 # ==========================================
 def analyze_ticker(ticker, name, market_type, start_date):
     try:
@@ -289,17 +152,19 @@ def analyze_ticker(ticker, name, market_type, start_date):
         c6 = current_price >= (low_52w * 1.30)  # 저점 대비 최소 30% 반등
         
         # 5. 정예 VCP 압축 필터
+        # - 신고가 턱밑 (-8% 이내)
         drop_pct = (current_price - high_52w) / high_52w * 100
         c_near_high = drop_pct >= -8.0
         
+        # - VDU 거래량 고갈 (15% ~ 55% 사이 : 0% 무체결 종목 원천 배제)
         vol_ratio = (volume.iloc[-1] / vol_avg50) * 100 if vol_avg50 > 0 else 100.0
         c_vdu = (15.0 <= vol_ratio <= 55.0)
         
+        # - 5일 캔들 응축 (1.5% ~ 6.5% 사이 : 1% 미만 완전 정체 종목 배제)
         recent_5d_range = ((high.iloc[-5:].max() - low.iloc[-5:].min()) / current_price) * 100
         c_tight = (1.5 <= recent_5d_range <= 6.5)
         
         if c1 and c2 and c3 and c4 and c5 and c6 and c_near_high and c_vdu and c_tight:
-            rs_raw_val = calculate_rs_score(close)
             return {
                 "name": name,
                 "ticker": ticker,
@@ -310,15 +175,14 @@ def analyze_ticker(ticker, name, market_type, start_date):
                 "tight_pct": round(recent_5d_range, 1),
                 "atr_pct": round(atr_ratio, 1),
                 "ret_60d": round(ret_60d, 1),
-                "high_52w": int(high_52w),
-                "rs_raw": rs_raw_val
+                "high_52w": int(high_52w)
             }
     except Exception:
         return None
     return None
 
 # ==========================================
-# 6. 메인 실행 루틴 (SEPA + RS 우선순위 + CANSLIM 2단계)
+# 4. 메인 실행 루틴
 # ==========================================
 def main():
     status, comment, cash_guideline, dist_count, index_price = analyze_korea_traffic_light()
@@ -337,93 +201,41 @@ def main():
             if res:
                 passed_stocks.append(res)
                 
-    # ==========================================
-    # [우선순위 정렬] 오닐 가중 RS 기준으로 종목 정렬 및 1~99 점수 산출
-    # ==========================================
-    ranked_stocks = rank_candidates_by_rs(passed_stocks)
-    total_count = len(ranked_stocks)
+    passed_stocks.sort(key=lambda x: x['drop_pct'], reverse=True)
+    total_count = len(passed_stocks)
     
-    # ==========================================
-    # 🚀 [1단계 발송] 국내장 SEPA Tier 1 기술적 선별 결과
-    # ==========================================
-    msg1 = f"🚦 *[국내장 SEPA 시장 신호등 & 데일리 브리핑]*\n"
-    msg1 += f"• **상태**: {status}\n"
-    msg1 += f"• **코스피 종가**: `{index_price}`pt (유효 분산일: {dist_count}개)\n"
-    msg1 += f"• **권장 현금 비중**: `{cash_guideline}`\n"
-    msg1 += f"• **진단**: _{comment}_\n"
-    msg1 += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    # 텔레그램 메시지 헤더
+    msg = f"🚦 *[국내장 SEPA 시장 신호등 & 데일리 브리핑]*\n"
+    msg += f"• **상태**: {status}\n"
+    msg += f"• **코스피 종가**: `{index_price}`pt (유효 분산일: {dist_count}개)\n"
+    msg += f"• **권장 현금 비중**: `{cash_guideline}`\n"
+    msg += f"• **진단**: _{comment}_\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
     
     if "🔴 빨간불" in status:
-        msg1 += f"⚠️ *[국내 하락장 경보: 신규 매수 전면 금지 (현금 100%)]*\n"
-        msg1 += f"시장 하락 속에서도 추세를 지켜낸 탄력 주도주 **총 {total_count}개**입니다. (FTD 반등 확인 전까지 관심종목 관찰)\n\n"
+        msg += f"⚠️ *[국내 하락장 경보: 신규 매수 전면 금지 (현금 100%)]*\n"
+        msg += f"시장 하락 속에서도 추세를 지켜낸 탄력 주도주 **총 {total_count}개**입니다. (FTD 반등 확인 전까지 관심종목 관찰)\n\n"
     else:
-        msg1 += f"🏆 *[국내장 Tier 1 탄력 주도주 ({total_count}개) - RS 우선순위 순]*\n"
-        msg1 += "_필터: 고점 -8% + VDU 고갈(15~55%) + 5일 진폭(1.5~6.5%) + RS 가중치 정렬_\n\n"
+        msg += f"🏆 *[국내장 Tier 1 탄력 성장 주도주 ({total_count}개)]*\n"
+        msg += "_필터: 고점 -8% + VDU 고갈(15~55%) + 5일 진폭(1.5~6.5%) + 3개월 상승 탄력주_\n\n"
         
-    if ranked_stocks:
-        for idx, s in enumerate(ranked_stocks[:20], 1):
-            msg1 += f"*{idx}위. {s['name']}* (`{s['ticker']}` / {s['market']}) ⭐ **RS {s['rs_score']}**: {s['price']:,}원\n"
-            msg1 += f"   • 고점 괴리: `{s['drop_pct']}%` (전고점 {s['high_52w']:,}원)\n"
-            msg1 += f"   • 거래량 수축: `50일 평균의 {s['vol_ratio']}%` 🧊\n"
-            msg1 += f"   • 5일 캔들 응축: `진폭 {s['tight_pct']}%` (일변동: `{s['atr_pct']}%`)\n"
-            msg1 += f"   • 3개월 모멘텀: `+{s['ret_60d']}%`\n\n"
+    if passed_stocks:
+        for idx, s in enumerate(passed_stocks[:20], 1):
+            msg += f"{idx}. ⭐ *{s['name']}* (`{s['ticker']}` / {s['market']}): {s['price']:,}원\n"
+            msg += f"   • 고점 괴리: `{s['drop_pct']}%` (전고점 {s['high_52w']:,}원)\n"
+            msg += f"   • 거래량 수축: `50일 평균의 {s['vol_ratio']}%` 🧊\n"
+            msg += f"   • 5일 캔들 응축: `진폭 {s['tight_pct']}%` (평소 일변동: `{s['atr_pct']}%`)\n"
+            msg += f"   • 최근 3개월 모멘텀: `+{s['ret_60d']}%`\n\n"
             
         if "🔴 빨간불" in status:
             msg += "👉 *실전 전략*: 코스피 FTD 반등 확인 전까지는 '눈으로만 관찰'하십시오."
         else:
             msg += "👉 *실전 대응*: 전고점/피벗 돌파 시 -4% 손절선 잡고 1차 분할 매수"
     else:
-        msg1 += "ℹ️ 정체/저변동성 종목 배제 후 조건 통과 종목 0개 (현금 보존 국면)"
+        msg += "ℹ️ 정체/저변동성 종목 배제 후 조건 통과 종목 0개 (현금 보존 국면)"
         
-    print(f"1단계 전송 완료. 통과 종목 {total_count}개")
-    send_telegram_msg(msg1)
-
-    # 통과 종목이 없으면 2단계 실적 체크를 건너뜁니다.
-    if not ranked_stocks:
-        return
-
-    # 1단계와 2단계 메시지 사이 텀 확보 (순차 노출 및 텔레그램 API 레이트 리밋 방지)
-    time.sleep(2)
-
-    # ==========================================
-    # 💎 [2단계 발송] CANSLIM 펀더멘털 더블체크
-    # ==========================================
-    canslim_passed = []
-    canslim_failed = []
-
-    print("국내 선별 종목 CANSLIM 펀더멘털 검증 중...")
-    for s in ranked_stocks[:20]:
-        c_eval = check_korea_canslim_fundamentals(s['ticker'], s['market'])
-        c_eval["name"] = s["name"]
-        c_eval["market"] = s["market"]
-        c_eval["rs_score"] = s["rs_score"]
-        c_eval["price"] = s["price"]
-        
-        if c_eval["is_canslim"]:
-            canslim_passed.append(c_eval)
-        else:
-            canslim_failed.append(c_eval)
-
-    msg2 = "💎 *[2단계] 국내장 CANSLIM 펀더멘털 더블체크*\n"
-    msg2 += f"SEPA 상위 {len(ranked_stocks[:20])}개 중 **{len(canslim_passed)}개 적합 판정**\n"
-    msg2 += "━━━━━━━━━━━━━━━━━━━━\n\n"
-
-    if canslim_passed:
-        msg2 += "🌟 *[최우선 매수 후보: SEPA 기술적 + CANSLIM 실적 겸비]*\n"
-        for idx, p in enumerate(canslim_passed, 1):
-            msg2 += (
-                f"**{idx}순위. {p['name']}** (`{p['ticker']}`) (RS: `{p['rs_score']}` | {p['price']:,}원)\n"
-                f"   • 최근 실적 성장: `{p['eps_growth']}` (기준: +20% 이상)\n"
-                f"   • 외국인/기관 지분율: `{p['inst_ownership']}`\n\n"
-            )
-
-    if canslim_failed:
-        msg2 += "⚠️ *[차트만 완성형 (실적 기준 미달 또는 적자/데이터부족)]*\n"
-        for f in canslim_failed:
-            msg2 += f"• **{f['name']}** (`{f['ticker']}` | RS `{f['rs_score']}`): 최근실적 `{f['eps_growth']}` / 수급 `{f['inst_ownership']}`\n"
-
-    print("2단계 CANSLIM 리포트 전송 완료")
-    send_telegram_msg(msg2)
+    print(f"전송 완료. 통과 종목 {total_count}개")
+    send_telegram_msg(msg)
 
 if __name__ == "__main__":
     main()
