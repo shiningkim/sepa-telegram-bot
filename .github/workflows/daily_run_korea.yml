@@ -18,10 +18,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 한국 거래소 패키지(pykrx) 설치
+      - name: 패키지 설치
         run: |
           python -m pip install --upgrade pip
-          pip install pykrx pandas requests
+          pip install finance-datareader pandas requests
 
       - name: 국내 주식 스크리너 실행
         env:
