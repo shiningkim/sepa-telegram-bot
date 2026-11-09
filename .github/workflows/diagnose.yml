@@ -1,0 +1,114 @@
+name: SEPA Stock Diagnosis
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: '진단할 미국 티커 또는 국내 종목명/코드 (예: FROG, TSLA, 000250, 삼천당제약)'
+        required: true
+        default: 'FROG'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 코드 가져오기
+        uses: actions/checkout@v4
+
+      - name: 파이썬 3.10 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 필수 라이브러리 설치
+        run: |
+          pip install yfinance finance-datareader pandas requests
+
+      - name: 종목 진단 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TARGET_TICKER: ${{ github.event.inputs.ticker }}
+        run: |
+          python -c "
+          import os, requests, yfinance as yf, FinanceDataReader as fdr
+
+          token = os.environ.get('TELEGRAM_BOT_TOKEN')
+          chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+          target = os.environ.get('TARGET_TICKER').strip().upper()
+
+          def send_msg(text):
+              url = f'https://api.telegram.org/bot{token}/sendMessage'
+              requests.post(url, json={'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
+
+          # 데이터 로드 (국내/미국 자동 판별)
+          df, name, is_kr = None, target, False
+          if target.isdigit() and len(target) == 6:
+              is_kr = True
+              df = fdr.DataReader(target)
+          elif any('\uac00' <= c <= '\ud7a3' for c in target):
+              is_kr = True
+              df_krx = fdr.StockListing('KRX')
+              matched = df_krx[df_krx['Name'] == target]
+              if not matched.empty:
+                  code = matched.iloc[0]['Code']
+                  name = f'{target} ({code})'
+                  df = fdr.DataReader(code)
+          else:
+              ticker_obj = yf.Ticker(target)
+              df = ticker_obj.history(period='1y')
+
+          if df is None or len(df) < 180:
+              send_msg(f'❌ `{target}` 데이터를 찾을 수 없거나 데이터가 부족합니다.')
+              exit(0)
+
+          close = df['종가'] if '종가' in df.columns else df['Close']
+          high = df['고가'] if '고가' in df.columns else df['High']
+          low = df['저가'] if '저가' in df.columns else df['Low']
+          vol = df['거래량'] if '거래량' in df.columns else df['Volume']
+
+          p = close.iloc[-1]
+          s50 = close.rolling(50).mean().iloc[-1]
+          s150 = close.rolling(150).mean().iloc[-1]
+          s200 = close.rolling(200).mean().iloc[-1]
+          s200_20 = close.rolling(200).mean().iloc[-20]
+          h52 = close.max()
+          v50 = vol.rolling(50).mean().iloc[-1]
+
+          drop = (p - h52) / h52 * 100
+          v_ratio = (vol.iloc[-1] / v50) * 100 if v50 > 0 else 100
+          tight = ((high.iloc[-5:].max() - low.iloc[-5:].min()) / p) * 100
+          slope = (s200 - s200_20) / s200_20 * 100
+
+          # Stage 판정
+          if p > s50 > s150 > s200 and slope > 0.3:
+              stage, desc, act = '🟢 Stage 2 (본격 상승)', '정배열 우상향 가속 중인 최적의 매수 타겟 구간', '피벗/VCP 돌파 시 진입 고려'
+          elif p < s200 and slope < 0:
+              stage, desc, act = '🔴 Stage 4 (본격 하락)', '장기 역배열 약세 구간', '절대 매수 금지'
+          elif p >= h52 * 0.75 and (p < s50 or slope <= 0.3):
+              stage, desc, act = '🟡 Stage 3 (천장/분산)', '기관 매물 출회 및 변동성 확대 위험 구간', '신규 매수 금지, 분할 익절'
+          else:
+              stage, desc, act = '⚪ Stage 1 (바닥 횡보)', '하락 후 바닥을 다지는 중', 'Stage 2 전환 확인 전까지 관망'
+
+          c_align = '✅' if p > s50 > s150 > s200 else '❌'
+          c_200 = '✅' if slope > 0.3 else '❌'
+          c_high = '✅ (-8% 이내)' if drop >= -8 else ('⚠️ (-15% 이내)' if drop >= -15 else '❌ 괴리 큼')
+          c_vdu = '🧊 VDU 고갈' if v_ratio <= 50 else ('🔥 수급 유입' if v_ratio >= 120 else '⚪ 평범')
+          c_tight = '✅ 응축 (6% 이하)' if tight <= 6 else '❌ 변동성 큼'
+
+          p_str = f'{int(p):,}원' if is_kr else f'${p:.2f}'
+          h_str = f'{int(h52):,}원' if is_kr else f'${h52:.2f}'
+
+          msg = f'📊 *[SEPA 종목 정밀 진단: {name}]*\n'
+          msg += f'• 현재가: `{p_str}` (52주 고점: `{h_str}`)\n\n'
+          msg += f'🎯 *[추세 주기]*: {stage}\n_{desc}_\n\n'
+          msg += f'1. 이평선 정배열: {c_align}\n'
+          msg += f'2. 200일선 우상향: {c_200}\n'
+          msg += f'3. 52주 고점 괴리: `{drop:.1f}%` ({c_high})\n'
+          msg += f'4. 거래량: `평균의 {v_ratio:.1f}%` ({c_vdu})\n'
+          msg += f'5. 5일 변동성: `{tight:.1f}%` ({c_tight})\n'
+          msg += '━━━━━━━━━━━━━━━━━━━━\n'
+          msg += f'👉 *가이드*: {act}'
+
+          send_msg(msg)
+          "
