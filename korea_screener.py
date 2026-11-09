@@ -1,5 +1,3 @@
-하는 김에 한국 시장 코드도 수정해줘.
-
 import os
 import time
 import requests
