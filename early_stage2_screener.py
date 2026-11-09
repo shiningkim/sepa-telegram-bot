@@ -83,7 +83,7 @@ def analyze_early_stage2(df, ticker):
         vol_avg50 = volume.rolling(50).mean().iloc[-1]
         dollar_vol = curr_p * vol_avg50
         if vol_avg50 < 250000 or dollar_vol < 5000000:
-        return None
+            return None
 
         # 2. 평소 주가 탄력성 검증 (14일 ATR 비율 >= 2.3% : 둔한 보험/은행주 배제)
         tr1 = high - low
