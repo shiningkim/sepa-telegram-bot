@@ -20,9 +20,71 @@ def send_telegram_msg(message: str):
     except Exception as e:
         print(f"텔레그램 전송 실패: {e}")
 
+# ==========================================
+# 🚦 1. 윌리엄 오닐 시장 신호등 판정 함수
+# ==========================================
+def analyze_market_traffic_light():
+    """S&P 500 지수를 바탕으로 분산일 및 FTD를 계산하여 신호등 판정"""
+    try:
+        spy = yf.Ticker("^GSPC")
+        df = spy.history(period="6mo")
+        if len(df) < 50:
+            return "🟡 노란불", "지수 데이터 부족", 50, 0
+            
+        close = df['Close']
+        volume = df['Volume']
+        current_price = close.iloc[-1]
+        
+        sma50 = close.rolling(50).mean().iloc[-1]
+        sma200 = close.rolling(200).mean().iloc[-1]
+        
+        # 최근 25거래일 기준 유효 분산일(Distribution Days) 카운트
+        dist_count = 0
+        recent_25 = df.iloc[-25:]
+        for i in range(1, len(recent_25)):
+            price_change = (recent_25['Close'].iloc[i] - recent_25['Close'].iloc[i-1]) / recent_25['Close'].iloc[i-1]
+            vol_increase = recent_25['Volume'].iloc[i] > recent_25['Volume'].iloc[i-1]
+            
+            # -0.2% 이상 하락 & 거래량 증가 시 분산일
+            if price_change <= -0.002 and vol_increase:
+                dist_count += 1
+                
+        # 최근 15거래일 최저점 및 FTD 체크
+        recent_15 = df.iloc[-15:]
+        lowest_idx = recent_15['Low'].idxmin()
+        days_since_low = len(df.loc[lowest_idx:]) - 1
+        
+        has_ftd = False
+        if 4 <= days_since_low <= 11:
+            recent_day_change = (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]
+            recent_vol_inc = volume.iloc[-1] > volume.iloc[-2]
+            if recent_day_change >= 0.012 and recent_vol_inc:
+                has_ftd = True
+
+        # 신호등 상태 머신 판정
+        # 빨간불: 50일선/200일선 아래 + 분산일 4개 이상 또는 명확한 하락 국면
+        if current_price < sma50 or dist_count >= 5:
+            status = "🔴 빨간불 (Market in Correction)"
+            cash_guideline = "80% ~ 100% (매수 금지)"
+            comment = f"지수가 50일선 아래에 위치하거나 분산일({dist_count}개) 과다 누적으로 전면 리스크 관리 국면입니다."
+        elif dist_count >= 3:
+            status = "🟡 노란불 (Uptrend Under Pressure)"
+            cash_guideline = "50% ~ 70% (방어적 운용)"
+            comment = f"분산일이 {dist_count}개 누적되어 상승 탄력이 둔화되었습니다. 손절선을 -3%로 단축하십시오."
+        else:
+            status = "🟢 초록불 (Confirmed Uptrend)"
+            cash_guideline = "0% ~ 20% (적극 매수 허용)"
+            comment = "주요 이평선 위에서 분산일이 통제되고 있어 주도주 피벗 돌파에 적극 진입 가능한 상태입니다."
+            
+        return status, comment, cash_guideline, dist_count, round(current_price, 2)
+    except Exception as e:
+        print(f"지수 분석 실패: {e}")
+        return "⚪ 판정 불가", "네트워크 오류", "50%", 0, 0
+
+# ==========================================
+# 2. 미국 상장 유니버스 수집
+# ==========================================
 def get_us_tickers() -> list:
-    """미국 전체 상장 보통주 유니버스 수집"""
-    print("미국 상장 종목 목록 수집 중...")
     url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
     try:
         resp = requests.get(url, timeout=15)
@@ -31,25 +93,27 @@ def get_us_tickers() -> list:
             t.strip().replace(".", "-") for t in raw_tickers 
             if t.strip() and not any(c in t for c in ["^", "/", "~", "$", "+"])
         ]
-        print(f"총 {len(cleaned)}개 종목 확보.")
-        return cleaned[:2500]  # 유효 상위 2,500개 종목 대상
-    except Exception as e:
-        print(f"티커 로드 실패: {e}")
+        return cleaned[:2500]
+    except Exception:
         return ["MRK", "VRTX", "RS", "FROG", "NVDA", "AAPL", "MSFT"]
 
+# ==========================================
+# 3. 메인 실행 루틴
+# ==========================================
 def main():
+    # 1단계: 시장 신호등 상태 우선 판정
+    status, comment, cash_guideline, dist_count, index_price = analyze_market_traffic_light()
+    
     tickers = get_us_tickers()
     passed_stocks = []
     
     batch_size = 100
-    print(f"미네르비니 Tier 1 정예 압축 스크리닝 시작 (총 {len(tickers)}개 대상)...")
+    print(f"시장 신호등: {status} | 종목 스크리닝 시작...")
     
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i:i + batch_size]
         try:
-            # 100개씩 묶음 일괄 다운로드 (속도 최적화)
             data = yf.download(batch, period="1y", group_by='ticker', threads=True, progress=False)
-            
             for ticker in batch:
                 try:
                     df = data[ticker] if len(batch) > 1 else data
@@ -61,10 +125,8 @@ def main():
                     high = df['High']
                     low = df['Low']
                     volume = df['Volume']
-                    
                     current_price = close.iloc[-1]
                     
-                    # 1. 기관 매매 가능 종목 필터 ($10 이상 종목만 선별)
                     if current_price < 10.0:
                         continue
                         
@@ -76,33 +138,25 @@ def main():
                     high_52w = close.max()
                     low_52w = close.min()
                     
-                    vol_current = volume.iloc[-1]
                     vol_avg50 = volume.rolling(50).mean().iloc[-1]
-                    vol_ratio = (vol_current / vol_avg50) * 100 if vol_avg50 > 0 else 100.0
+                    vol_ratio = (volume.iloc[-1] / vol_avg50) * 100 if vol_avg50 > 0 else 100.0
                     
-                    # 2. 미네르비니 추세 템플릿 기본 룰
+                    # 미네르비니 추세 템플릿
                     c_trend1 = current_price > sma150 and current_price > sma200
                     c_trend2 = sma150 > sma200
-                    c_trend3 = sma200 > sma200_20d_ago                      # 200일선 우상향
-                    c_trend4 = sma50 > sma150 and sma50 > sma200            # 정배열 완성
-                    c_trend5 = current_price > sma50                        # 50일선 사수
-                    c_trend6 = current_price >= (low_52w * 1.30)            # 52주 저점 대비 +30% 이상
+                    c_trend3 = sma200 > sma200_20d_ago
+                    c_trend4 = sma50 > sma150 and sma50 > sma200
+                    c_trend5 = current_price > sma50
+                    c_trend6 = current_price >= (low_52w * 1.30)
                     
-                    # 3. ★ 핵심 압축 3대 필터 ★
-                    # 필터 A: 52주 신고가 대비 -8% 이내 초밀착 (신고가 턱밑 대장주만)
+                    # 정예 압축 필터 (고점 -8% 이내 & VDU 50% 이하 & 5일 진폭 6% 이내)
                     c_near_high = current_price >= (high_52w * 0.92)
-                    
-                    # 필터 B: 거래량 바짝 마름(VDU) 필수 조건 (평균 대비 50% 이하)
                     c_vdu = vol_ratio <= 50.0
-                    
-                    # 필터 C: VCP 캔들 변동성 응축(Tightness) (최근 5일간 고저 진폭 6% 이내)
                     recent_5d_range = (high.iloc[-5:].max() - low.iloc[-5:].min()) / current_price
                     c_tight = recent_5d_range <= 0.06
                     
-                    # 모든 조건 통과 종목만 엄선
                     if (c_trend1 and c_trend2 and c_trend3 and c_trend4 and 
                         c_trend5 and c_trend6 and c_near_high and c_vdu and c_tight):
-                        
                         drop_pct = (current_price - high_52w) / high_52w * 100
                         passed_stocks.append({
                             "ticker": ticker,
@@ -114,30 +168,39 @@ def main():
                         })
                 except Exception:
                     continue
-        except Exception as e:
-            print(f"배치 에러: {e}")
+        except Exception:
             continue
 
-    # 최고가에 가장 가까운 순서대로 정렬
     passed_stocks.sort(key=lambda x: x['drop_pct'], reverse=True)
     
-    # 텔레그램 메시지 구성
-    if passed_stocks:
-        total_count = len(passed_stocks)
-        msg = f"🏆 *[미네르비니 Tier 1 정예 주도주 ({total_count}개)]*\n"
-        msg += "_조건: 신고가 -8% 이내 + VDU 거래량 고갈 + 5일 진폭 6% 이하 응축_\n\n"
-        
-        for s in passed_stocks:
-            msg += f"⭐ *{s['ticker']}*: ${s['price']}\n"
-            msg += f"   • 최고가 괴리: `{s['drop_pct']}%` (전고점 ${s['high_52w']})\n"
-            msg += f"   • 거래량 수축: `50일 평균의 {s['vol_ratio']}%` 🧊\n"
-            msg += f"   • 5일 캔들 응축: `진폭 {s['tight_pct']}%` (Tight)\n\n"
-            
-        msg += "👉 *실전 전략*: 전고점/핸들 상단 돌파 시 -4% 손절선 잡고 1차 진입"
+    # 텔레그램 메시지 헤더: 시장 신호등 브리핑
+    msg = f"🚦 *[SEPA 시장 신호등 & 데일리 브리핑]*\n"
+    msg += f"• **상태**: {status}\n"
+    msg += f"• **S&P 500 종가**: `{index_price}`pt (유효 분산일: {dist_count}개)\n"
+    msg += f"• **권장 현금 비중**: `{cash_guideline}`\n"
+    msg += f"• **진단**: _{comment}_\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # 신호등 상태에 따른 종목 노출 처리
+    if "🔴 빨간불" in status:
+        msg += "⚠️ *[하락장 경보: 신규 매수 전면 금지]*\n"
+        msg += "시장이 빨간불일 때는 종목이 템플릿을 통과하더라도 가짜 돌파 실패율이 70%를 상회합니다. 모든 돌파 매수를 중단하고 현금을 100% 지키십시오.\n\n"
+        if passed_stocks:
+            msg += f"_※ 차트가 깨지지 않고 버티는 관찰 후보 ({len(passed_stocks)}개):_\n"
+            for s in passed_stocks[:5]:
+                msg += f"• `{s['ticker']}` (${s['price']}, 고점 대비 {s['drop_pct']}%) - 매수 금지/관찰용\n"
     else:
-        msg = "ℹ️ *[미네르비니 정예 스크리너]*: 오늘 기준 완벽한 VCP/VDU 조건을 만족한 종목 0개 (현금 보존 및 관망 국면)"
-        
-    print(f"최종 엄선 {len(passed_stocks)}개 통과. 전송 중...")
+        if passed_stocks:
+            msg += f"🏆 *[오늘의 Tier 1 정예 주도주 ({len(passed_stocks)}개)]*\n\n"
+            for s in passed_stocks[:10]:
+                msg += f"⭐ *{s['ticker']}*: ${s['price']}\n"
+                msg += f"   • 고점 괴리: `{s['drop_pct']}%` (전고점 ${s['high_52w']})\n"
+                msg += f"   • 거래량 수축: `50일 평균의 {s['vol_ratio']}%` 🧊\n"
+                msg += f"   • 5일 캔들 응축: `진폭 {s['tight_pct']}%`\n\n"
+            msg += "👉 *실전 대응*: 피벗 돌파 시 -4% 스탑로스로 진입"
+        else:
+            msg += "ℹ️ *[주도주 알림]*: 완벽한 VCP 조건을 만족한 종목 0개 (관망 국면)"
+            
     send_telegram_msg(msg)
 
 if __name__ == "__main__":
