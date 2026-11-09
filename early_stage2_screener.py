@@ -79,16 +79,28 @@ def analyze_early_stage2(df, ticker):
         gap_from_pivot = (curr_p - base_high_120d) / base_high_120d * 100
         is_near_pivot = -6.0 <= gap_from_pivot <= 0.0
 
-        # 5) VCP 거래량 수축(VDU) 및 5거래일 진폭 응축
+        # 1. 일평균 거래대금 필터 ($5,000,000 이상) & 최소 유동성
         vol_avg50 = volume.rolling(50).mean().iloc[-1]
-        if vol_avg50 < 100000:  # 유동성 최소 10만 주
+        dollar_vol = curr_p * vol_avg50
+        if vol_avg50 < 250000 or dollar_vol < 5000000:
+        return None
+
+        # 2. 평소 주가 탄력성 검증 (14일 ATR 비율 >= 2.3% : 둔한 보험/은행주 배제)
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr_ratio = (tr.rolling(14).mean().iloc[-1] / curr_p) * 100
+        if atr_ratio < 2.3:
             return None
-
+        
+        # 3. 거래량 고갈 (15% ~ 55% 사이 : 무거래 0% 종목 차단)
         vol_ratio = (volume.iloc[-1] / vol_avg50) * 100
-        is_vdu = vol_ratio <= 55.0  # 거래량 50일 평균의 55% 이하로 마름
-
+        is_vdu = (15.0 <= vol_ratio <= 55.0)
+        
+        # 4. 5일 캔들 응축 (1.5% ~ 6.0% 사이 : 정체된 종목 배제)
         recent_5d_range = ((high.iloc[-5:].max() - low.iloc[-5:].min()) / curr_p) * 100
-        is_tight = recent_5d_range <= 6.0  # 5일간 6% 이내의 극단적 응축
+        is_tight = (1.5 <= recent_5d_range <= 6.0)
 
         if is_stage1_flattening and is_above_key_mas and is_sound_base and is_near_pivot and is_vdu and is_tight:
             return {
