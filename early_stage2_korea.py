@@ -88,12 +88,28 @@ def analyze_korea_early_stage2(ticker, name, market_type, start_date):
         gap_from_pivot = (curr_p - base_high_120d) / base_high_120d * 100
         is_near_pivot = -6.0 <= gap_from_pivot <= 0.0
 
-        # 5) VCP 거래량 수축(VDU) 및 5거래일 진폭 응축
+        # 1. 일평균 거래대금 20억 원 이상 필터
+        vol_avg50 = volume.rolling(50).mean().iloc[-1]
+        daily_val = curr_p * vol_avg50
+        if curr_p < 3000 or vol_avg50 < 100000 or daily_val < 2_000_000_000:
+            return None
+        
+        # 2. 평소 주가 탄력성 검증 (14일 ATR 비율 >= 2.5% : 둔한 가치주 배제)
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr_ratio = (tr.rolling(14).mean().iloc[-1] / curr_p) * 100
+        if atr_ratio < 2.5:
+            return None
+        
+        # 3. 거래량 고갈 (15% ~ 55% 사이)
         vol_ratio = (volume.iloc[-1] / vol_avg50) * 100
-        is_vdu = vol_ratio <= 55.0  # 거래량 평소의 55% 이하
-
+        is_vdu = (15.0 <= vol_ratio <= 55.0)
+        
+        # 4. 5일 캔들 응축 (1.5% ~ 6.5% 사이)
         recent_5d_range = ((high.iloc[-5:].max() - low.iloc[-5:].min()) / curr_p) * 100
-        is_tight = recent_5d_range <= 6.5  # 5일간 6.5% 이내 응축
+        is_tight = (1.5 <= recent_5d_range <= 6.5)
 
         if is_stage1_flattening and is_above_key_mas and is_sound_base and is_near_pivot and is_vdu and is_tight:
             return {
