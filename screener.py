@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import pandas as pd
 import yfinance as yf
@@ -8,6 +9,11 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def send_telegram_msg(message: str):
+    """텔레그램 메시지 전송 (최대 3회 재시도 및 25초 타임아웃)"""
+    if not BOT_TOKEN or not CHAT_ID:
+        print("[Telegram] 토큰 또는 Chat ID가 설정되지 않았습니다.")
+        return
+        
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -22,6 +28,7 @@ def send_telegram_msg(message: str):
                 return
         except Exception as e:
             print(f"[{attempt}/3] 텔레그램 전송 실패: {e}")
+        time.sleep(2)
 
 # ==========================================
 # 🚦 1. 윌리엄 오닐 시장 신호등 판정 함수
@@ -72,7 +79,7 @@ def analyze_market_traffic_light():
         return "⚪ 판정 불가", "네트워크 오류", "50%", 0, 0
 
 # ==========================================
-# 2. 미국 상장 유니버스 수집 (성장주 및 S&P 500/나스닥 중심)
+# 2. 미국 상장 유니버스 수집
 # ==========================================
 def get_us_tickers() -> list:
     url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
@@ -89,7 +96,101 @@ def get_us_tickers() -> list:
         return ["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "FROG", "AMAL", "TSLA", "VRTX", "MRK"]
 
 # ==========================================
-# 3. 메인 실행 루틴 (FROG형 탄력 성장주 VCP 필터 탑재)
+# 📊 3. 윌리엄 오닐 스타일 가중 RS 계산 및 랭킹 정렬
+# ==========================================
+def calculate_rs_score(close_series: pd.Series) -> float:
+    """
+    윌리엄 오닐 가중 RS 공식:
+    RS = (2 * 3M 수익률) + 6M 수익률 + 9M 수익률 + 12M 수익률
+    """
+    try:
+        if len(close_series) < 180:
+            return 0.0
+            
+        curr = close_series.iloc[-1]
+        p_3m = (curr - close_series.iloc[-60]) / close_series.iloc[-60] if len(close_series) >= 60 else 0
+        p_6m = (curr - close_series.iloc[-120]) / close_series.iloc[-120] if len(close_series) >= 120 else 0
+        p_9m = (curr - close_series.iloc[-180]) / close_series.iloc[-180] if len(close_series) >= 180 else 0
+        p_12m = (curr - close_series.iloc[0]) / close_series.iloc[0]
+
+        return float((2 * p_3m) + p_6m + p_9m + p_12m)
+    except Exception:
+        return 0.0
+
+def rank_candidates_by_rs(candidates: list) -> list:
+    """후보군 내 상대 강도를 1~99점 백분위 RS Rating으로 환산하고 내림차순 정렬"""
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda x: x.get("rs_raw", 0.0), reverse=True)
+    total = len(candidates)
+    
+    for idx, item in enumerate(candidates):
+        if total == 1:
+            item["rs_score"] = 99
+        else:
+            # 1위 종목이 99점에 수렴하도록 상대 백분위 부여
+            item["rs_score"] = 99 - int((idx / total) * 98)
+            
+    return candidates
+
+# ==========================================
+# 💎 4. CANSLIM 펀더멘털(C, A, I) 정밀 진단
+# ==========================================
+def check_canslim_fundamentals(ticker: str) -> dict:
+    """
+    - C (Current EPS): 최근 분기 EPS 성장률 >= 20%
+    - A (Annual EPS): Forward EPS 성장 잠재력 >= 15%
+    - I (Institutions): 기관 지분율 >= 20%
+    """
+    summary = {
+        "ticker": ticker,
+        "is_canslim": False,
+        "c_pass": False,
+        "a_pass": False,
+        "i_pass": False,
+        "eps_growth": "N/A",
+        "inst_ownership": "N/A",
+        "fwd_growth": "N/A",
+    }
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info
+
+        # C: 최근 분기 실적 YoY
+        eg = info.get("earningsGrowth")
+        if eg is not None:
+            summary["eps_growth"] = f"{eg * 100:.1f}%"
+            if eg >= 0.20:
+                summary["c_pass"] = True
+
+        # A: Trailing vs Forward EPS 비교
+        t_eps = info.get("trailingEps")
+        f_eps = info.get("forwardEps")
+        if t_eps and f_eps and t_eps > 0:
+            growth = (f_eps - t_eps) / t_eps
+            summary["fwd_growth"] = f"{growth * 100:.1f}%"
+            if growth >= 0.15:
+                summary["a_pass"] = True
+
+        # I: 기관 보유 비중
+        inst = info.get("heldPercentInstitutions")
+        if inst is not None:
+            summary["inst_ownership"] = f"{inst * 100:.1f}%"
+            if inst >= 0.20:
+                summary["i_pass"] = True
+
+        # 판정: C(분기 실적) 필수 충족 + (A 또는 I 충족 시 CANSLIM 합격)
+        if summary["c_pass"] and (summary["a_pass"] or summary["i_pass"]):
+            summary["is_canslim"] = True
+
+    except Exception as e:
+        print(f"[{ticker}] CANSLIM 진단 예외: {e}")
+
+    return summary
+
+# ==========================================
+# 5. 메인 실행 루틴 (SEPA + RS 우선순위 + CANSLIM 2단계)
 # ==========================================
 def main():
     status, comment, cash_guideline, dist_count, index_price = analyze_market_traffic_light()
@@ -155,20 +256,21 @@ def main():
                     c_trend6 = current_price >= (low_52w * 1.30)
                     
                     # 5. 정예 VCP 필터
-                    # - 52주 고점 -8% 이내
                     drop_pct = (current_price - high_52w) / high_52w * 100
                     c_near_high = drop_pct >= -8.0
                     
-                    # - VDU 거래량 고갈 (15% ~ 55% 사이 : 0%인 무거래/호가공백 종목 원천 배제)
                     vol_ratio = (volume.iloc[-1] / vol_avg50) * 100 if vol_avg50 > 0 else 100.0
                     c_vdu = (15.0 <= vol_ratio <= 55.0)
                     
-                    # - 5일 캔들 응축 (1.5% ~ 6.0% 사이 : 1% 미만 완전 정체 종목 배제)
                     recent_5d_range = ((high.iloc[-5:].max() - low.iloc[-5:].min()) / current_price) * 100
                     c_tight = (1.5 <= recent_5d_range <= 6.0)
                     
                     if (c_trend1 and c_trend2 and c_trend3 and c_trend4 and 
                         c_trend5 and c_trend6 and c_near_high and c_vdu and c_tight):
+                        
+                        # 오닐 가중 RS Raw Score 사전 계산 (추가 네트워크 호출 없이 다운로드된 df 활용)
+                        rs_raw_val = calculate_rs_score(close)
+                        
                         passed_stocks.append({
                             "ticker": ticker,
                             "price": round(current_price, 2),
@@ -177,48 +279,98 @@ def main():
                             "tight_pct": round(recent_5d_range, 1),
                             "atr_pct": round(atr_ratio, 1),
                             "ret_60d": round(ret_60d, 1),
-                            "high_52w": round(high_52w, 2)
+                            "high_52w": round(high_52w, 2),
+                            "rs_raw": rs_raw_val
                         })
                 except Exception:
                     continue
         except Exception:
             continue
 
-    passed_stocks.sort(key=lambda x: x['drop_pct'], reverse=True)
-    
-    # 텔레그램 메시지 생성
-    msg = f"🚦 *[SEPA 시장 신호등 & 데일리 브리핑]*\n"
-    msg += f"• **상태**: {status}\n"
-    msg += f"• **S&P 500 종가**: `{index_price}`pt (유효 분산일: {dist_count}개)\n"
-    msg += f"• **권장 현금 비중**: `{cash_guideline}`\n"
-    msg += f"• **진단**: _{comment}_\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    total_count = len(passed_stocks)
+    # ==========================================
+    # [우선순위 정렬] 오닐 가중 RS 기준으로 종목 정렬 및 1~99 점수 산출
+    # ==========================================
+    ranked_stocks = rank_candidates_by_rs(passed_stocks)
+    total_count = len(ranked_stocks)
+
+    # ==========================================
+    # 🚀 [1단계 발송] SEPA Tier 1 기술적 선별 결과
+    # ==========================================
+    msg1 = f"🚦 *[SEPA 시장 신호등 & 데일리 브리핑]*\n"
+    msg1 += f"• **상태**: {status}\n"
+    msg1 += f"• **S&P 500 종가**: `{index_price}`pt (유효 분산일: {dist_count}개)\n"
+    msg1 += f"• **권장 현금 비중**: `{cash_guideline}`\n"
+    msg1 += f"• **진단**: _{comment}_\n"
+    msg1 += "━━━━━━━━━━━━━━━━━━━━\n\n"
     
     if "🔴 빨간불" in status:
-        msg += f"⚠️ *[하락장 경보: 신규 매수 전면 금지 (현금 100%)]*\n"
-        msg += f"시장 하락 압력 속에서도 차트를 방어 중인 탄력 성장주 **총 {total_count}개**입니다. (FTD 전까지 관심종목 관찰)\n\n"
+        msg1 += f"⚠️ *[하락장 경보: 신규 매수 전면 금지 (현금 100%)]*\n"
+        msg1 += f"시장 하락 압력 속에서도 차트를 방어 중인 탄력 성장주 **총 {total_count}개**입니다. (FTD 전까지 관심종목 관찰)\n\n"
     else:
-        msg += f"🏆 *[오늘의 Tier 1 탄력 성장 주도주 ({total_count}개)]*\n"
-        msg += "_필터: 고점 -8% + VDU 고갈(15~55%) + 5일 진폭(1.5~6%) + 3개월 상승 탄력주_\n\n"
+        msg1 += f"🏆 *[오늘의 Tier 1 탄력 주도주 ({total_count}개) - RS 우선순위 순]*\n"
+        msg1 += "_필터: 고점 -8% + VDU 고갈(15~55%) + 5일 진폭(1.5~6%) + RS 가중치 정렬_\n\n"
 
-    if passed_stocks:
-        for idx, s in enumerate(passed_stocks[:20], 1):
-            msg += f"{idx}. ⭐ *{s['ticker']}*: `${s['price']}`\n"
-            msg += f"   • 고점 괴리: `{s['drop_pct']}%` (전고점 `${s['high_52w']}`)\n"
-            msg += f"   • 거래량 수축: `평균의 {s['vol_ratio']}%` 🧊\n"
-            msg += f"   • 5일 캔들 응축: `진폭 {s['tight_pct']}%` (평소 일변동: `{s['atr_pct']}%`)\n"
-            msg += f"   • 최근 3개월 모멘텀: `+{s['ret_60d']}%`\n\n"
+    if ranked_stocks:
+        for idx, s in enumerate(ranked_stocks[:20], 1):
+            msg1 += f"*{idx}위. {s['ticker']}* (⭐ **RS {s['rs_score']}**): `${s['price']}`\n"
+            msg1 += f"   • 고점 괴리: `{s['drop_pct']}%` (전고점 `${s['high_52w']}`)\n"
+            msg1 += f"   • 거래량 수축: `평균의 {s['vol_ratio']}%` 🧊\n"
+            msg1 += f"   • 5일 캔들 응축: `진폭 {s['tight_pct']}%` (일변동: `{s['atr_pct']}%`)\n"
+            msg1 += f"   • 3개월 모멘텀: `+{s['ret_60d']}%`\n\n"
             
         if "🔴 빨간불" in status:
-            msg += "👉 *실전 전략*: 아무리 자리가 예뻐도 시장 FTD 확인 전까지는 '눈으로만 관찰'하십시오."
+            msg1 += "👉 *실전 전략*: 아무리 자리가 예뻐도 시장 FTD 확인 전까지는 '눈으로만 관찰'하십시오."
         else:
-            msg += "👉 *실전 대응*: 피벗/핸들 상단 돌파 시 -4% 스탑로스로 1차 분할 진입"
+            msg1 += "👉 *실전 대응*: 피벗/핸들 상단 돌파 시 -4% 스탑로스로 1차 분할 진입"
     else:
-        msg += "ℹ️ 정체/저변동성 종목 배제 후 조건 통과 종목 0개 (적절한 베이스 형성 대기)"
+        msg1 += "ℹ️ 정체/저변동성 종목 배제 후 조건 통과 종목 0개 (적절한 베이스 형성 대기)"
             
-    send_telegram_msg(msg)
+    send_telegram_msg(msg1)
+
+    # 종목이 없으면 2단계 실적 체크를 건너뜁니다.
+    if not ranked_stocks:
+        return
+
+    # 1단계와 2단계 메시지 사이 간격 (순차 노출 및 텔레그램 API 레이트 리밋 방지)
+    time.sleep(2)
+
+    # ==========================================
+    # 💎 [2단계 발송] CANSLIM 펀더멘털 더블체크
+    # ==========================================
+    canslim_passed = []
+    canslim_failed = []
+
+    print("통과 종목 CANSLIM 펀더멘털 검증 중...")
+    for s in ranked_stocks[:20]:
+        c_eval = check_canslim_fundamentals(s['ticker'])
+        c_eval["rs_score"] = s["rs_score"]
+        c_eval["price"] = s["price"]
+        
+        if c_eval["is_canslim"]:
+            canslim_passed.append(c_eval)
+        else:
+            canslim_failed.append(c_eval)
+
+    msg2 = "💎 *[2단계] CANSLIM 펀더멘털 더블체크*\n"
+    msg2 += f"SEPA 상위 {len(ranked_stocks[:20])}개 중 **{len(canslim_passed)}개 적합 판정**\n"
+    msg2 += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    if canslim_passed:
+        msg2 += "🌟 *[최우선 매수 후보: SEPA 기술적 + CANSLIM 실적 겸비]*\n"
+        for idx, p in enumerate(canslim_passed, 1):
+            msg2 += (
+                f"**{idx}순위. {p['ticker']}** (RS: `{p['rs_score']}` | `${p['price']}`)\n"
+                f"   • 분기 EPS 성장: `{p['eps_growth']}` (기준: +20% 이상)\n"
+                f"   • 포워드 성장 전망: `{p['fwd_growth']}`\n"
+                f"   • 기관 보유 지분율: `{p['inst_ownership']}`\n\n"
+            )
+
+    if canslim_failed:
+        msg2 += "⚠️ *[차트만 완성형 (실적 기준 미달 또는 적자/데이터부족)]*\n"
+        for f in canslim_failed:
+            msg2 += f"• **{f['ticker']}** (RS `{f['rs_score']}`): 분기EPS `{f['eps_growth']}` / 기관 `{f['inst_ownership']}`\n"
+
+    send_telegram_msg(msg2)
 
 if __name__ == "__main__":
     main()
