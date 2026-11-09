@@ -1,0 +1,30 @@
+name: SEPA Daily Screener
+
+on:
+  schedule:
+    # 한국 시간 기준 매일 오전 6시 30분 실행 (미국 정규장 마감 30분 후)
+    - cron: '30 21 * * 1-5'
+  workflow_dispatch: # 버튼 눌러서 즉시 수동 실행 허용
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 코드 가져오기
+        uses: actions/checkout@v3
+
+      - name: 파이썬 설정
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 필요 패키지 설치
+        run: |
+          pip install yfinance pandas requests
+
+      - name: 스크리너 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python screener.py
