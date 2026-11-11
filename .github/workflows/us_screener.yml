@@ -1,0 +1,30 @@
+name: Peter Lynch US Screener
+
+on:
+  schedule:
+    # 월~금 EST 17:00 (UTC 22:00)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch: # Actions 탭에서 수동 실행 가능
+
+jobs:
+  run-us:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests yfinance
+
+      - name: Run US Screener
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python us_lynch_agent.py
