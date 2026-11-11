@@ -3,49 +3,77 @@ import time
 import requests
 import pandas as pd
 import yfinance as yf
+from datetime import datetime
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-def send_telegram(text: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[Telegram 미설정 - 콘솔 출력]\n" + text)
+def send_telegram_msg(message: str):
+    """텔레그램 메시지 전송 (3회 재시도 + 마크다운 실패 시 텍스트 폴백)"""
+    if not BOT_TOKEN or not CHAT_ID:
+        print("[Telegram] 토큰 또는 Chat ID가 설정되지 않았습니다.\n" + message)
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
+        "chat_id": CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
     }
-    resp = requests.post(url, json=payload, timeout=10)
-    if resp.status_code != 200:
-        print(f"텔레그램 전송 에러: {resp.status_code} - {resp.text}")
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(url, json=payload, timeout=25)
+            if resp.status_code == 200:
+                return
+            else:
+                # 마크다운 특수문자 에러 시 일반 텍스트 재시도
+                payload.pop("parse_mode", None)
+                resp_fb = requests.post(url, json=payload, timeout=25)
+                if resp_fb.status_code == 200:
+                    return
+        except Exception as e:
+            print(f"[{attempt}/3] 텔레그램 전송 실패: {e}")
+        time.sleep(2)
 
-def get_sp500_tickers(limit=150):
-    """위키피디아에서 S&P 500 티커 리스트 자동 수집"""
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0"}
+# ==========================================
+# 1. 미국 상장 유니버스 수집 (기존 프로그램과 100% 동일)
+# ==========================================
+def get_us_tickers() -> list:
+    url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
     try:
-        tables = pd.read_html(requests.get(url, headers=headers).text)
-        df = tables[0]
-        tickers = df["Symbol"].str.replace(".", "-", regex=False).tolist()
-        return tickers[:limit] if limit else tickers
-    except Exception as e:
-        print(f"S&P 500 리스트 수집 실패: {e}")
-        # 폴백용 기본 준대형/중형 유망주 리스트
-        return [
-            "CROX", "ELF", "DECK", "MEDP", "LULU", "ON", "FSLR", "ANET", 
-            "FTNT", "URI", "PWR", "FIX", "VRT", "SMCI", "PHM", "LEN"
+        resp = requests.get(url, timeout=15)
+        raw_tickers = resp.text.strip().split("\n")
+        cleaned = [
+            t.strip().replace(".", "-") for t in raw_tickers 
+            if t.strip() and not any(c in t for c in ["^", "/", "~", "$", "+"])
         ]
+        return cleaned[:2500]
+    except Exception:
+        # 비상용 기본 티커 목록
+        return ["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "CROX", "ELF", "DECK", "MEDP", "LULU", "FSLR"]
 
-def screen_us_stock(ticker: str):
+# ==========================================
+# 2. 피터 린치 펀더멘털 정밀 검증
+# ==========================================
+def check_peter_lynch_fundamentals(ticker: str) -> dict:
+    """
+    피터 린치 핵심 기준:
+    1. PEG < 1.0 (0.5 이하는 초우수)
+    2. 건전한 성장률: EPS 성장률 15% ~ 45% (과열 잡주 배제)
+    3. 부채비율(D/E): 80% 이하 (안전한 재무구조)
+    """
     try:
         t = yf.Ticker(ticker)
-        # fast_info 및 info 혼용 접근
         info = t.info
 
+        # PER (Trailing 우선, 없으면 Forward)
         pe = info.get("trailingPE") or info.get("forwardPE")
+        
+        # 성장률 (이익 성장률 우선, 없으면 매출 성장률)
         growth = info.get("earningsGrowth") or info.get("revenueGrowth")
+        
+        # 부채비율
         de = info.get("debtToEquity", 50.0)
 
         if not pe or not growth or pe <= 0 or growth <= 0:
@@ -54,58 +82,23 @@ def screen_us_stock(ticker: str):
         growth_pct = growth * 100
         peg = pe / growth_pct
 
-        # 린치 기준: PEG < 1.0, 지속 가능한 성장률(15~45%), 부채비율 80% 이하
-        is_hit = (peg < 1.0) and (15.0 <= growth_pct <= 45.0) and (de <= 80.0)
+        # 린치 기준 필터: PEG 1.0 미만, 성장률 15~45%, 부채비율 80% 이하
+        is_lynch_pass = (peg < 1.0) and (15.0 <= growth_pct <= 45.0) and (de <= 80.0)
 
         price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
 
         return {
             "ticker": ticker,
             "name": info.get("shortName", ticker),
-            "price": price,
+            "price": round(price, 2),
             "pe": round(pe, 2),
             "growth": round(growth_pct, 2),
             "peg": round(peg, 2),
             "de": round(de, 2),
-            "is_hit": is_hit
+            "is_pass": is_lynch_pass
         }
     except Exception:
         return None
 
-def main():
-    print("S&P 500 유니버스 수집 중...")
-    # Actions 실행 시간 고려: S&P 500 중 상위 120개 검사 (전체 검사를 원하면 limit=None)
-    universe = get_sp500_tickers(limit=120)
-    
-    hits = []
-    scanned_count = 0
-
-    for ticker in universe:
-        res = screen_us_stock(ticker)
-        if res:
-            scanned_count += 1
-            if res["is_hit"]:
-                hits.append(res)
-        # yfinance Rate Limit 방지용 딜레이
-        time.sleep(0.15)
-
-    if hits:
-        # PEG 낮은 순(저평가 우수 순) 상위 10개 정렬
-        hits = sorted(hits, key=lambda x: x["peg"])[:10]
-
-        msg = f"🇺🇸 *[피터 린치 Agent - 미국 저평가 고성장주]*\n"
-        msg += f"• 검사: {scanned_count}개 / 통과: {len(hits)}개\n\n"
-        for item in hits:
-            msg += f"• *{item['name']} ({item['ticker']})*\n"
-            msg += f"  - 주가: ${item['price']}\n"
-            msg += f"  - PEG: `{item['peg']}` (PER {item['pe']} / 성장률 {item['growth']}%)\n"
-            msg += f"  - 부채비율: `{item['de']}%`\n\n"
-    else:
-        msg = f"🇺🇸 *[피터 린치 Agent - 미국 스크리닝 완료]*\n"
-        msg += f"• 총 {scanned_count}개 종목 검사 완료\n"
-        msg += f"• 현재 조건(`PEG < 1.0`, `성장률 15~45%`, `부채비율 ≤ 80%`)을 통과한 종목이 없습니다."
-
-    send_telegram(msg)
-
-if __name__ == "__main__":
-    main()
+# ==========================================
+# 3. 메인 실행 루틴
