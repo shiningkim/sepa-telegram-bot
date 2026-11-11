@@ -101,4 +101,81 @@ def check_peter_lynch_fundamentals(ticker: str) -> dict:
         return None
 
 # ==========================================
-# 3. 메인 실행 루틴
+# 3. 메인 실행 루틴 (1차 가격/거래대금 압축 -> 2차 린치 지표 검증)
+# ==========================================
+def main():
+    tickers = get_us_tickers()
+    print(f"미국 피터 린치 스크리너 시작 (총 유니버스: {len(tickers)}개)...")
+
+    # 1단계: yf.download를 통한 기본 유동성 1차 필터링 ($10 이상, 50일 평균 거래대금 300만 달러 이상)
+    liquid_candidates = []
+    batch_size = 100
+
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i + batch_size]
+        try:
+            data = yf.download(batch, period="3mo", group_by='ticker', threads=True, progress=False)
+            for ticker in batch:
+                try:
+                    df = data[ticker] if len(batch) > 1 else data
+                    df = df.dropna(subset=['Close'])
+                    if len(df) < 40:
+                        continue
+                    
+                    close = df['Close']
+                    volume = df['Volume']
+                    current_price = close.iloc[-1]
+                    vol_avg50 = volume.mean()
+                    dollar_vol = current_price * vol_avg50
+
+                    # 피터 린치는 가격 차트 정배열은 보지 않으나, 상장폐지급/거래불가 잡주는 배제
+                    if current_price >= 10.0 and dollar_vol >= 3000000:
+                        liquid_candidates.append(ticker)
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    print(f"1차 유동성 필터 통과: {len(liquid_candidates)}개 종목. 2차 린치 지표 검증 시작...")
+
+    # 2단계: 린치 정량 밸류에이션(PEG, D/E) 검증 (실행 시간 고려 상위 200개 우선 정밀 분석)
+    lynch_hits = []
+    scanned_count = 0
+
+    for ticker in liquid_candidates[:200]:
+        res = check_peter_lynch_fundamentals(ticker)
+        if res:
+            scanned_count += 1
+            if res["is_pass"]:
+                lynch_hits.append(res)
+        time.sleep(0.1)  # Yahoo API 호출 딜레이
+
+    # PEG가 낮은 순(성장 대비 가장 저평가된 순) 정렬
+    lynch_hits = sorted(lynch_hits, key=lambda x: x["peg"])
+
+    # ==========================================
+    # 텔레그램 발송
+    # ==========================================
+    total_found = len(lynch_hits)
+    msg = "📖 *[피터 린치 Agent - 미국 저평가 고성장주]*\n"
+    msg += f"• **검사 대상**: {scanned_count}개 종목 (1차 유동성 통과군 기준)\n"
+    msg += f"• **통과 종목**: 총 {total_found}개 포착\n"
+    msg += "• **기준**: `PEG < 1.0` + `이익성장 15~45%` + `부채비율 ≤ 80%`\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    if lynch_hits:
+        for idx, item in enumerate(lynch_hits[:15], 1):
+            peg_badge = "🔥 초우수" if item['peg'] <= 0.5 else "✨ 우수"
+            msg += f"*{idx}위. {item['ticker']}* ({item['name']}): `${item['price']}`\n"
+            msg += f"   • **PEG**: `{item['peg']}` ({peg_badge})\n"
+            msg += f"   • 실적: PER `{item['pe']}배` / 성장률 `{item['growth']}%`\n"
+            msg += f"   • 부채비율: `{item['de']}%`\n\n"
+        
+        msg += "👉 *실전 전략*: 미네르비니 기준에서 아직 정배열이 아니더라도, 실적 성장 대비 주가가 눌려 있는 턴어라운드/선취매 슬롯으로 분할 진입을 고려하십시오."
+    else:
+        msg += "ℹ️ 현재 유니버스에서 린치의 엄격한 저평가 고성장 기준을 통과한 종목이 없습니다."
+
+    send_telegram_msg(msg)
+
+if __name__ == "__main__":
+    main()
