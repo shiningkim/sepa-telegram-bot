@@ -2,12 +2,12 @@ name: Peter Lynch KR Screener
 
 on:
   schedule:
-    # 월~금 KST 16:00 (UTC 07:00)
-    - cron: '0 7 * * 1-5'
-  workflow_dispatch: # Actions 탭에서 수동 실행 가능
+    # 월~금 한국시간(KST) 16:10 (UTC 07:10)
+    - cron: '10 7 * * 1-5'
+  workflow_dispatch: # Actions 탭에서 수동 즉시 실행 가능
 
 jobs:
-  run-kr:
+  run-kr-screener:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -20,9 +20,10 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install requests
+          python -m pip install --upgrade pip
+          pip install requests pandas finance-datareader
 
-      - name: Run KR Screener
+      - name: Run KR Peter Lynch Screener
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
