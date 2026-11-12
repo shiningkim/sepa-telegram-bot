@@ -87,8 +87,10 @@ def get_target_tickers():
     # 스팩, 우선주, 관리/환기성 종목 필터링
     df_clean = df_krx[~df_krx['Name'].str.contains('스팩|우$|우B$|1호|2호|3호|4호|5호', regex=True, na=False)]
     
-    kospi = df_clean[df_clean['Market'] == 'KOSPI'].sort_values(by='Marcap', ascending=False).head(200)
-    kosdaq = df_clean[df_clean['Market'] == 'KOSDAQ'].sort_values(by='Marcap', ascending=False).head(300)
+# 기존: 코스피 200 + 코스닥 300 = 500개
+# 추천: 코스피 300 + 코스닥 500 = 800개 (시총 약 1,500억 원 선까지 커버)
+    kospi = df_clean[df_clean['Market'] == 'KOSPI'].sort_values(by='Marcap', ascending=False).head(300)
+    kosdaq = df_clean[df_clean['Market'] == 'KOSDAQ'].sort_values(by='Marcap', ascending=False).head(500)
     
     targets = []
     for _, row in kospi.iterrows():
