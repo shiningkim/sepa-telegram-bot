@@ -83,8 +83,9 @@ def analyze_early_stage2(df, ticker):
         if not (-0.6 <= slope_200 <= 1.0):
             return None
 
-        # Stage 2 초입 주가 위치: 200일선 및 50일선 돌파 안착
-        if not (curr_p > sma200 and curr_p > sma50 and sma50 > sma150):
+        # 주가가 50일선과 200일선을 모두 돌파했고, 50일선이 최근 10일 전보다 상승 전환 중일 때
+        sma50_10d = close.rolling(50).mean().iloc[-10]
+        if not (curr_p > sma200 and curr_p > sma50 and sma50 > sma50_10d):
             return None
 
         # 최근 6개월(120거래일) 베이스 박스권 상단(피벗) 및 깊이
