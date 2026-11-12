@@ -1,0 +1,40 @@
+name: US Fisher Investments Screener
+
+on:
+  schedule:
+    # 한국 시간(KST) 기준 매주 화요일, 토요일 오전 07:42 실행 (UTC 전날 22:42)
+    # 서버 부하를 피하기 위해 정각이 아닌 42분으로 설정
+    - cron: '42 22 * * 1,5'
+  workflow_dispatch: # 수동 실행 버튼 활성화
+
+jobs:
+  run-fisher-screener:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 저장소 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 환경 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 필수 라이브러리 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas requests lxml html5lib
+
+      - name: 미국장 피셔 스크리너 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python fisher_us_screener.py
+
+      - name: 실행 실패 시 텔레그램 경고 알림
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=⚠️ [경고] US Fisher Investments Screener 실행 중 오류가 발생했습니다. Actions 로그를 확인하세요."
