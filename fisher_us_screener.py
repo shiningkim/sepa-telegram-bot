@@ -3,6 +3,7 @@ import time
 import requests
 import pandas as pd
 import yfinance as yf
+from io import StringIO
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -36,7 +37,6 @@ def send_telegram_msg(message: str):
 # 1. 피셔식 톱다운(Top-Down) 매크로 & 섹터 진단
 # ==========================================
 def analyze_fisher_macro_and_sectors():
-    # 매크로 지표: S&P500, VIX, 미국 10년물(^TNX), 13주 단기금리(^IRX), 러셀2000(IWM)
     macro_tickers = ["SPY", "IWM", "^VIX", "^TNX", "^IRX"]
     data = yf.download(macro_tickers, period="1y", progress=False)['Close']
     
@@ -89,14 +89,27 @@ def analyze_fisher_macro_and_sectors():
     }
 
 # ==========================================
-# 2. S&P 500 종목 리스트 확보
+# 2. S&P 500 종목 리스트 확보 (403 차단 우회)
 # ==========================================
 def get_sp500_tickers():
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url)
+    # 1순위: 차단이 없는 안정적인 공개 CSV 데이터셋
+    csv_url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+    try:
+        df = pd.read_csv(csv_url)
+        return [str(t).replace('.', '-').strip() for t in df['Symbol'].tolist()]
+    except Exception:
+        pass
+
+    # 2순위(백업): User-Agent 헤더를 포함한 위키피디아 파싱
+    wiki_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+    resp = requests.get(wiki_url, headers=headers, timeout=15)
+    resp.raise_for_status()
+    tables = pd.read_html(StringIO(resp.text))
     df = tables[0]
-    tickers = [t.replace('.', '-') for t in df['Symbol'].tolist()]
-    return tickers
+    return [str(t).replace('.', '-').strip() for t in df['Symbol'].tolist()]
 
 # ==========================================
 # 3. 피셔식 정량 펀더멘털 필터 (PSR + 매출총이익률 + 추세)
@@ -126,18 +139,13 @@ def screen_fisher_stock(ticker):
         if psr is None or gross_margin is None or rev_growth is None:
             return None
 
-        # 2) 피셔 핵심 정량 조건:
-        # - 합리적 매출 밸류에이션: 0 < PSR <= 3.0
-        # - 높은 경제적 해자(가격 결정력): 매출총이익률 >= 35% (0.35)
-        # - 실적 성장 지속: 매출 성장률 >= 5% (0.05)
-        # - 재무 건전성: 부채비율 150% 이하 (또는 데이터 없음 허용)
+        # 2) 피셔 핵심 정량 조건
         is_low_psr = (0 < psr <= 3.0)
         is_high_margin = (gross_margin >= 0.35)
         is_growing = (rev_growth >= 0.05)
         is_healthy_debt = (debt_to_equity is None or debt_to_equity <= 150)
 
         if is_low_psr and is_high_margin and is_growing and is_healthy_debt:
-            # 피셔 스코어 계산 (마진이 높고 PSR이 낮을수록 높은 점수)
             fisher_score = (gross_margin * 100) / psr
             return {
                 "ticker": ticker,
@@ -159,9 +167,9 @@ def main():
     
     print("2. S&P 500 우량 저PSR·고마진 기업 스크리닝 중...")
     tickers = get_sp500_tickers()
+    print(f"대상 종목 수: {len(tickers)}개")
     
     passed = []
-    # yfinance info 조회 부하 방지를 위해 worker 수 조절
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(screen_fisher_stock, t): t for t in tickers}
         for future in as_completed(futures):
@@ -169,21 +177,19 @@ def main():
             if res:
                 passed.append(res)
 
-    # 피셔 퀄리티 스코어(매출총이익률 / PSR) 상위 순 정렬
     passed.sort(key=lambda x: x['score'], reverse=True)
 
-    # 텔레그램 리포트 작성
     msg = "🏛️ *[미국장 피셔 인베스트먼트 퀀트 브리핑]*\n"
     msg += "_기준: 톱다운 매크로 체제 + 주도 섹터 + 저PSR(≤3.0) & 고마진(≥35%) 우량주_\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
     
-    msg += f"🧭 *1. 톱다운 시장 체제 진단*\n"
+    msg += "🧭 *1. 톱다운 시장 체제 진단*\n"
     msg += f"• 상태: *{macro['regime']}*\n"
     msg += f"• S&P500 200일선 이격: `{macro['spy_gap']}%` / VIX: `{macro['vix']}`\n"
     msg += f"• 장단기 금리차(10Y-3M): `{macro['spread']}%p`\n"
     msg += f"• 스타일 우위: `{macro['style']}`\n\n"
 
-    msg += f"📊 *2. 모멘텀 상위 주도 섹터 (3개월 RS)*\n"
+    msg += "📊 *2. 모멘텀 상위 주도 섹터 (3개월 RS)*\n"
     if macro['top_sectors']:
         for idx, (sym, kname, ret) in enumerate(macro['top_sectors'], 1):
             msg += f"  {idx}위. *{kname}* (`{sym}`): `+{ret}%`\n"
